@@ -338,6 +338,7 @@ extension AutoISF {
                             DecimalTextField("0", value: $state.iobThresholdPercent, formatter: formatter)
                                 .disabled(isPresented)
                         }
+
                     } header: { Text("Settings") }
 
                     Section {

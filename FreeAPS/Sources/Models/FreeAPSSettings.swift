@@ -51,6 +51,7 @@ struct FreeAPSSettings: JSON, Equatable {
     var displayFatAndProteinOnWatch: Bool = false
     var confirmBolusFaster: Bool = false
     var onlyAutotuneBasals: Bool = false
+    var calculateISFSuggestions: Bool = false
     var overrideFactor: Decimal = 0.8
     var useCalc: Bool = true
     var fattyMeals: Bool = false
@@ -127,6 +128,7 @@ struct FreeAPSSettings: JSON, Equatable {
     var iobThresholdPercent: Decimal = 100
     var autoisf_max: Decimal = 1.2
     var autoisf_min: Decimal = 0.8
+    var isfScale: Decimal = 1.0
     // B30
     var use_B30 = false
     var iTime_Start_Bolus: Decimal = 1.5
@@ -457,6 +459,10 @@ extension FreeAPSSettings: Decodable {
             settings.onlyAutotuneBasals = onlyAutotuneBasals
         }
 
+        if let calculateISFSuggestions = try? container.decode(Bool.self, forKey: .calculateISFSuggestions) {
+            settings.calculateISFSuggestions = calculateISFSuggestions
+        }
+
         if let displayPredictions = try? container.decode(Bool.self, forKey: .displayPredictions) {
             settings.displayPredictions = displayPredictions
         }
@@ -679,6 +685,10 @@ extension FreeAPSSettings: Decodable {
 
         if let autoisf_min = try? container.decode(Decimal.self, forKey: .autoisf_min) {
             settings.autoisf_min = autoisf_min
+        }
+
+        if let isfScale = try? container.decode(Decimal.self, forKey: .isfScale) {
+            settings.isfScale = isfScale
         }
 
         if let glucoseOverrideThreshold = try? container.decode(Decimal.self, forKey: .glucoseOverrideThreshold) {

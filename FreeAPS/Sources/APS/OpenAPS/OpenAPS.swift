@@ -271,6 +271,12 @@ final class OpenAPS {
                     } else {
                         promise(.success(nil))
                     }
+
+                    // Build the improved ISF schedule if the user has opted in.
+                    let freeapsRaw = self.loadFileFromStorage(name: FreeAPS.settings)
+                    if FreeAPSSettings(from: freeapsRaw)?.calculateISFSuggestions == true {
+                        self.buildReasonsISFSchedule()
+                    }
                 }
             }
         }
@@ -1389,5 +1395,252 @@ final class OpenAPS {
             return ""
         }
         return (try? String(contentsOf: url)) ?? ""
+    }
+
+    // MARK: - Calculated ISF Schedule
+
+    /// Builds a per-hour median ISF schedule from CoreData Reasons entries using the
+    /// improved algorithm: back-calculates isf_before = isf × ratio for every entry
+    /// (no near-basal filter), applies a global p5/p95 trim, then buckets by hour.
+    ///
+    /// Uses a 21-day window to match the web ISF Profiler. Requires at least 12 hours
+    /// with ≥ 3 direct data points each before the schedule is considered reliable.
+    @discardableResult
+    func buildReasonsISFSchedule() -> ReasonsISFSchedule? {
+        let cutoff = Date().addingTimeInterval(-21 * 24 * 3600) as NSDate
+        let reasons = CoreDataStorage().fetchReasons(interval: cutoff)
+
+        guard !reasons.isEmpty else {
+            debug(.openAPS, "Calculated ISF: no Reasons data available")
+            return nil
+        }
+
+        // Back-calculate isf_before = applied_isf × sensitivity_ratio for every entry.
+        // This recovers the profile (or autosens-adjusted) ISF before any dynamic scaling,
+        // which is the quantity we want regardless of how aggressively AutoISF was working.
+        var allEstimates: [(value: Double, hour: Int, date: Date)] = []
+
+        let mmolToMgdl = 1.0 / Double(GlucoseUnits.exchangeRate)
+
+        for r in reasons {
+            guard
+                let isfDecimal = r.isf?.decimalValue, isfDecimal > 0,
+                let ratioDecimal = r.ratio?.decimalValue, ratioDecimal > 0,
+                let date = r.date
+            else { continue }
+
+            // Reasons.isf is stored in the profile's display units (mmol/L/U or mg/dL/U).
+            // Normalize to mg/dL/U so displayISF(mgdl:) in the view produces correct output.
+            var isfBefore = Double(truncating: (isfDecimal * ratioDecimal) as NSDecimalNumber)
+            if r.mmol { isfBefore *= mmolToMgdl }
+            if isfBefore <= 0 { continue }
+
+            let hour = Calendar.current.component(.hour, from: date)
+            allEstimates.append((value: isfBefore, hour: hour, date: date))
+        }
+
+        guard !allEstimates.isEmpty else {
+            debug(.openAPS, "Calculated ISF: no valid estimates after back-calculation")
+            return nil
+        }
+
+        let totalEntries = allEstimates.count
+        let fromDate = allEstimates.map(\.date).min() ?? cutoff as Date
+        let toDate = allEstimates.map(\.date).max() ?? Date()
+
+        // Count distinct calendar days represented.
+        let calendar = Calendar.current
+        let daysAnalyzed = Set(allEstimates.map { calendar.startOfDay(for: $0.date) }).count
+
+        // Weighted percentile over a pre-sorted (ascending) parallel (values, weights) pair.
+        func weightedPercentile(_ values: [Double], weights: [Double], p: Double) -> Double {
+            guard values.count > 1 else { return values.first ?? 0 }
+            let totalWeight = weights.reduce(0, +)
+            guard totalWeight > 0 else { return values[values.count / 2] }
+            let target = p / 100.0 * totalWeight
+            var cumulative = 0.0
+            for i in 0 ..< values.count {
+                let prevCum = cumulative
+                cumulative += weights[i]
+                if cumulative >= target {
+                    if i == 0 || weights[i] <= 0 { return values[i] }
+                    let frac = (target - prevCum) / weights[i]
+                    return values[i - 1] + frac * (values[i] - values[i - 1])
+                }
+            }
+            return values.last!
+        }
+
+        // Recency weighting: weight = exp(-ln(2)/7 × daysSince), half-life 7 days.
+        // A settings change a week ago already outweighs data from three weeks ago.
+        let decayLambda = log(2.0) / 7.0
+
+        // Per-hour bucket fill — no global trim; each hour trims its own 5% tails.
+        var hourBuckets: [Int: [(value: Double, weight: Double)]] = [:]
+        for e in allEstimates {
+            let daysSince = toDate.timeIntervalSince(e.date) / 86400.0
+            let weight = exp(-decayLambda * daysSince)
+            hourBuckets[e.hour, default: []].append((value: e.value, weight: weight))
+        }
+
+        var qualifyingEntries = 0
+        var hourMedians: [Int: Double] = [:]
+        var counts: [String: Int] = [:]
+
+        for hour in 0 ..< 24 {
+            var pts = (hourBuckets[hour] ?? []).sorted { $0.value < $1.value }
+            let n = pts.count
+
+            // Trim bottom and top 5% by count (only when n is large enough to be meaningful).
+            if n >= 10 {
+                let trimN = Int(floor(Double(n) * 0.05))
+                pts = Array(pts.dropFirst(trimN).dropLast(trimN))
+            }
+
+            qualifyingEntries += pts.count
+            counts[String(hour)] = pts.count
+
+            if pts.count >= 3 {
+                let values  = pts.map(\.value)
+                let weights = pts.map(\.weight)
+                hourMedians[hour] = weightedPercentile(values, weights: weights, p: 50.0)
+            }
+        }
+
+        // Require at least 12 hours with direct measurements.
+        guard hourMedians.count >= 12 else {
+            debug(.openAPS, "Calculated ISF: only \(hourMedians.count) hours have ≥ 3 data points (need 12)")
+            return nil
+        }
+
+        // Interpolate hours with insufficient data from the nearest measured neighbour.
+        var schedule: [String: Double] = [:]
+        for (hour, median) in hourMedians {
+            schedule[String(hour)] = median
+        }
+        for hour in 0 ..< 24 {
+            guard schedule[String(hour)] == nil else { continue }
+            for offset in 1 ..< 12 {
+                if let v = schedule[String((hour - offset + 24) % 24)] { schedule[String(hour)] = v; break }
+                if let v = schedule[String((hour + offset) % 24)]      { schedule[String(hour)] = v; break }
+            }
+        }
+
+        // Overall median from directly-measured hours only.
+        let measuredMedians = (0 ..< 24)
+            .filter { (counts[String($0)] ?? 0) >= 3 }
+            .compactMap { schedule[String($0)] }
+            .sorted()
+        let overallMedian = measuredMedians[measuredMedians.count / 2]
+
+        // MARK: - Deviation analysis
+        // Sort by date ascending and compute per-entry BG delta from consecutive readings.
+        // deviation = actual_delta - expectedBGI, where expectedBGI = -IOB × isf_before × (elapsed/60).
+        // Positive deviation → BG dropped less than expected → profile ISF is too high → suggest lower ISF.
+        let sortedReasons = reasons.sorted { ($0.date ?? .distantPast) < ($1.date ?? .distantPast) }
+
+        var devHourBuckets: [Int: [(isfBefore: Double, deviation: Double, absExpBGI: Double, weight: Double)]] = [:]
+        var devQualifyingEntries = 0
+
+        for i in 1 ..< sortedReasons.count {
+            let prev = sortedReasons[i - 1]
+            let curr = sortedReasons[i]
+
+            guard
+                let prevDate = prev.date,
+                let currDate = curr.date,
+                let currGlucoseDecimal = curr.glucose?.decimalValue,
+                let prevGlucoseDecimal = prev.glucose?.decimalValue,
+                let iobDecimal = curr.iob?.decimalValue,
+                let isfDecimal = curr.isf?.decimalValue, isfDecimal > 0,
+                let ratioDecimal = curr.ratio?.decimalValue, ratioDecimal > 0,
+                let cobDecimal = curr.cob?.decimalValue
+            else { continue }
+
+            let elapsedMin = currDate.timeIntervalSince(prevDate) / 60.0
+            guard elapsedMin >= 3, elapsedMin <= 10 else { continue }
+
+            let iob = Double(truncating: iobDecimal as NSDecimalNumber)
+            guard iob > 0 else { continue }
+
+            let cob = Double(truncating: cobDecimal as NSDecimalNumber)
+            guard cob <= 5 else { continue }
+
+            var isfBefore = Double(truncating: (isfDecimal * ratioDecimal) as NSDecimalNumber)
+            if curr.mmol { isfBefore *= mmolToMgdl }
+            guard isfBefore > 0 else { continue }
+
+            let scale = curr.mmol ? mmolToMgdl : 1.0
+            let delta = (Double(truncating: currGlucoseDecimal as NSDecimalNumber)
+                - Double(truncating: prevGlucoseDecimal as NSDecimalNumber)) * scale
+            let expectedBGI = -iob * isfBefore * (elapsedMin / 60.0)
+            guard abs(expectedBGI) > 0.5 else { continue }
+
+            let deviation = delta - expectedBGI
+            let hour = Calendar.current.component(.hour, from: currDate)
+            let devDaysSince = toDate.timeIntervalSince(currDate) / 86400.0
+            let devWeight = exp(-decayLambda * devDaysSince)
+            devHourBuckets[hour, default: []].append((isfBefore, deviation, abs(expectedBGI), devWeight))
+            devQualifyingEntries += 1
+        }
+
+        // Per-hour: median deviation → adjustment fraction → suggested ISF.
+        var suggestedDirect: [String: Double] = [:]
+        for (hour, entries) in devHourBuckets {
+            guard entries.count >= 5 else { continue }
+
+            let sortedDev    = entries.sorted { $0.deviation < $1.deviation }
+            let sortedExpBGI = entries.sorted { $0.absExpBGI < $1.absExpBGI }
+            let sortedISF    = entries.sorted { $0.isfBefore < $1.isfBefore }
+
+            let medDev       = weightedPercentile(sortedDev.map(\.deviation),    weights: sortedDev.map(\.weight),    p: 50.0)
+            let medExpBGI    = weightedPercentile(sortedExpBGI.map(\.absExpBGI), weights: sortedExpBGI.map(\.weight), p: 50.0)
+            let medISFBefore = weightedPercentile(sortedISF.map(\.isfBefore),    weights: sortedISF.map(\.weight),    p: 50.0)
+
+            guard medExpBGI > 0.5 else { continue }
+
+            var adjFraction = medDev / medExpBGI
+            adjFraction = max(-0.20, min(0.20, adjFraction))
+
+            suggestedDirect[String(hour)] = medISFBefore * (1.0 - adjFraction)
+        }
+
+        // Interpolate suggested hours from nearest neighbour (require ≥6 directly-computed hours).
+        var suggestedSchedule: [String: Double]? = nil
+        if suggestedDirect.count >= 6 {
+            var interpolated = suggestedDirect
+            for hour in 0 ..< 24 {
+                guard interpolated[String(hour)] == nil else { continue }
+                for offset in 1 ..< 12 {
+                    if let v = interpolated[String((hour - offset + 24) % 24)] { interpolated[String(hour)] = v; break }
+                    if let v = interpolated[String((hour + offset) % 24)]      { interpolated[String(hour)] = v; break }
+                }
+            }
+            suggestedSchedule = interpolated
+        }
+
+        let suggestedMeasured = suggestedDirect.values.sorted()
+        let overallSuggestedMedian: Double? = suggestedMeasured.isEmpty
+            ? nil
+            : suggestedMeasured[suggestedMeasured.count / 2]
+
+        let result = ReasonsISFSchedule(
+            hours: schedule,
+            counts: counts,
+            overallMedian: overallMedian,
+            generatedAt: Date(),
+            daysAnalyzed: daysAnalyzed,
+            totalEntries: totalEntries,
+            qualifyingEntries: qualifyingEntries,
+            fromDate: fromDate,
+            toDate: toDate,
+            suggestedHours: suggestedSchedule,
+            overallSuggestedMedian: overallSuggestedMedian,
+            devQualifyingEntries: devQualifyingEntries
+        )
+
+        storage.save(result, as: Settings.reasonsISFSchedule)
+        debug(.openAPS, "Calculated ISF: built schedule from \(totalEntries) entries (\(daysAnalyzed) days); median \(String(format: "%.1f", overallMedian)) mg/dL/U; deviation entries \(devQualifyingEntries), suggested hours \(suggestedDirect.count)")
+        return result
     }
 }
