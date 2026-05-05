@@ -11,6 +11,16 @@ extension Settings {
         @State private var entity: String = "Readings"
         @State private var deletionAlert = false
         @State private var showCrashConfirm = false
+        @State private var searchText = ""
+
+        private var searchResults: [SettingsSearchEntry] {
+            guard !searchText.isEmpty else { return [] }
+            let query = searchText.lowercased()
+            return SettingsCatalogue.entries.filter {
+                $0.name.lowercased().contains(query) ||
+                    $0.section.lowercased().contains(query)
+            }
+        }
 
         @FetchRequest(
             entity: VNr.entity(),
@@ -33,6 +43,21 @@ extension Settings {
 
         var body: some View {
             Form {
+                if !searchText.isEmpty {
+                    Section {
+                        if searchResults.isEmpty {
+                            Text("No results for \"\(searchText)\"")
+                                .foregroundColor(.secondary)
+                        } else {
+                            ForEach(searchResults) { entry in
+                                searchResultRow(entry)
+                            }
+                        }
+                    } header: {
+                        Text(searchResults.isEmpty ? "" : "Results")
+                    }
+                }
+
                 Section {
                     Toggle("Closed loop", isOn: $state.closedLoop)
                 }
@@ -245,6 +270,11 @@ extension Settings {
                     }
                 }
             }
+            .searchable(
+                text: $searchText,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Search settings…"
+            )
             .sheet(isPresented: $showShareSheet) {
                 ShareSheet(activityItems: state.logItems())
             }
@@ -256,6 +286,19 @@ extension Settings {
             .navigationBarItems(trailing: Button("Close", action: state.hideSettingsModal))
             .navigationBarTitleDisplayMode(.inline)
             .onDisappear(perform: { state.uploadProfileAndSettings(false) })
+        }
+
+        private func searchResultRow(_ entry: SettingsSearchEntry) -> some View {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.name)
+                    Text(entry.section)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+            .navigationLink(to: entry.destination, from: self)
         }
 
         private func clearEntity(entity: String) {
