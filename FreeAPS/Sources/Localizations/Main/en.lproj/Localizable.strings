@@ -4107,3 +4107,6 @@ Enact a temp Basal or a temp target */
 
 /* Restore: the typed recovery token is not a UUID */
 "That isn't a recovery token. A token is 36 characters with dashes, like 1a2b3c4d-5e6f-…; copy it from your old phone under iAPS → Settings → Sharing." = "That isn't a recovery token. A token is 36 characters with dashes, like 1a2b3c4d-5e6f-…; copy it from your old phone under iAPS → Settings → Sharing.";
+
+/* Add Carbs: placeholder for the free-text note row */
+"Optional" = "Optional";
