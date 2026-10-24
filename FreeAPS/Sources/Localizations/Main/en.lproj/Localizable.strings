@@ -4132,6 +4132,9 @@ Enact a temp Basal or a temp target */
 /* Settings search, nothing matched */
 "No results for \"%@\"" = "No results for \"%@\"";
 
+/* Add Carbs: placeholder for the free-text note row */
+"Optional" = "Optional";
+
 /* --- Sharing: crash reports (opt-in, independent of the other sharing toggles) --- */
 "Crash Reports" = "Crash Reports";
 "Send crash reports" = "Send crash reports";
