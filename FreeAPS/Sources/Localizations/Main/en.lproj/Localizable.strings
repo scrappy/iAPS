@@ -4126,6 +4126,12 @@ Enact a temp Basal or a temp target */
 /* Hide the newer-release banner */
 "Dismiss" = "Dismiss";
 
+/* Settings search field placeholder */
+"Search settings…" = "Search settings…";
+
+/* Settings search, nothing matched */
+"No results for \"%@\"" = "No results for \"%@\"";
+
 /* --- Sharing: crash reports (opt-in, independent of the other sharing toggles) --- */
 "Crash Reports" = "Crash Reports";
 "Send crash reports" = "Send crash reports";
