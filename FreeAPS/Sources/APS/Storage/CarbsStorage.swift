@@ -124,7 +124,7 @@ final class BaseCarbsStorage: CarbsStorage, Injectable {
                         storage.save(Array(uniqEvents), as: file)
                     }
                 } else {
-                    // One line per stored entry, read by open-iaps.app: the oref "Carb entry" line
+                    // One line per stored entry for log-based analysis: the oref "Carb entry" line
                     // carries only time and grams, this adds who entered it and the note.
                     let when = Formatter.iso8601withFractionalSeconds.string(from: onlyCarbs.actualDate ?? creationDate)
                     debug(
