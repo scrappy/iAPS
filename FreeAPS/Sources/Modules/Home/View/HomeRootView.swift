@@ -1380,8 +1380,8 @@ extension Home {
                         ),
                         newer, state.versionNumber
                     ))
-                    .font(.footnote)
-                    .lineLimit(2)
+                        .font(.footnote)
+                        .lineLimit(2)
                     Spacer()
                     Button { state.dismissVersionBanner() } label: {
                         Image(systemName: "xmark").font(.footnote.bold())
