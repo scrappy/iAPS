@@ -1672,12 +1672,15 @@ extension BaseDeviceDataManager {
                 if let error = error {
                     debug(
                         .apsManager,
-                        "bolus failed: \(units) (adjusted: \(unitsAdjustedForConcentrationAndRounded)) - \(error.localizedDescription)"
+                        "bolus failed: \(units) (adjusted: \(unitsAdjustedForConcentrationAndRounded)), automatic: \(automatic) - \(error.localizedDescription)"
                     )
                     self.recordCommandFailure(.bolus(units: units, automatic: automatic), error: error)
                     continuation.resume(throwing: APSError.pumpError(error))
                 } else {
-                    debug(.apsManager, "bolus started: \(units) (adjusted: \(unitsAdjustedForConcentrationAndRounded))")
+                    debug(
+                        .apsManager,
+                        "bolus started: \(units) (adjusted: \(unitsAdjustedForConcentrationAndRounded)), automatic: \(automatic)"
+                    )
                     let enactedAmount = DoseEntry.fromDeviceUnits(
                         unitsAdjustedForConcentrationAndRounded,
                         concentration: concentration
